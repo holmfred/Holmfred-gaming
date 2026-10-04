@@ -49,11 +49,12 @@ export function AddonMatchPicker({
   }, [open])
 
   const normalized = query.trim().toLowerCase()
-  const visible = candidates
-    .filter((game) =>
-      normalized ? game.title.toLowerCase().includes(normalized) : true,
-    )
-    .slice(0, 40)
+  const visible =
+    open && normalized
+      ? candidates
+          .filter((game) => game.title.toLowerCase().includes(normalized))
+          .slice(0, 40)
+      : []
 
   return (
     <div className="addon-match-picker" ref={rootRef}>
@@ -89,7 +90,9 @@ export function AddonMatchPicker({
             autoFocus
             onChange={(event) => setQuery(event.target.value)}
           />
-          {visible.length === 0 ? (
+          {!normalized ? (
+            <p className="addon-match-empty">Type a game title to search.</p>
+          ) : visible.length === 0 ? (
             <p className="addon-match-empty">No games found.</p>
           ) : (
             <ul>

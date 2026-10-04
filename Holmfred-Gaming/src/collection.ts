@@ -45,7 +45,6 @@ function isCollectionGame(value: unknown): value is CollectionGame {
   const game = value as Partial<CollectionGame>
   return (
     typeof game.id === 'number' &&
-    typeof game.url === 'string' &&
     typeof game.title === 'string' &&
     Array.isArray(game.genres) &&
     typeof game.platformId === 'string' &&

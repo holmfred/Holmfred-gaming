@@ -98,7 +98,6 @@ function mapGame(apiGame, platformId) {
 
   return {
     id: apiGame.game_id,
-    url: apiGame.moby_url,
     title: apiGame.title,
     genres: (apiGame.genres || []).map((genre) => genre.genre_name),
     release_year: releaseYearForPlatform(apiGame, platformId),

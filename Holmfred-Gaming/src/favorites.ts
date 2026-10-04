@@ -50,7 +50,6 @@ function isFavoriteGame(value: unknown): value is FavoriteGame {
   const game = value as Partial<FavoriteGame>
   return (
     typeof game.id === 'number' &&
-    typeof game.url === 'string' &&
     typeof game.title === 'string' &&
     Array.isArray(game.genres) &&
     typeof game.platformId === 'string' &&

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { AddonMatchPicker } from './AddonMatchPicker.tsx'
 import { useAddonMatches } from './addonMatches.ts'
 import { useAuth } from './auth.tsx'
@@ -74,9 +74,19 @@ function gameKey(game: { platformId: string; id: number }) {
   return `${game.platformId}:${game.id}`
 }
 
+function isAdminUser(email: string | undefined) {
+  const allowed = (import.meta.env.VITE_ADMIN_EMAIL ?? '')
+    .split(',')
+    .map((value: string) => value.trim().toLowerCase())
+    .filter(Boolean)
+  if (!email || allowed.length === 0) return false
+  return allowed.includes(email.trim().toLowerCase())
+}
+
 function Catalog() {
   const { user, logout } = useAuth()
   const { syncing } = useLibrary()
+  const canManageAddons = isAdminUser(user?.email)
   const [platformId, setPlatformId] = useState(platforms[0].id)
   const [games, setGames] = useState<Game[]>([])
   const [allGames, setAllGames] = useState<ListGame[] | null>(null)
@@ -107,14 +117,13 @@ function Catalog() {
     removeGame,
   } = useCollection()
   const { matches, setMatch, clearMatch, getMatch } = useAddonMatches()
-  const { isDeleted, deleteAddon } = useDeletedAddons()
+  const { isDeleted, deleteAddon, deleted } = useDeletedAddons()
 
   const showingHave = platformId === HAVE_ID
   const showingWant = platformId === WANT_ID
   const showingCollection = showingHave || showingWant
   const showingAddons = platformId === ADDONS_ID
   const platform = platforms.find((item) => item.id === platformId) ?? platforms[0]
-  const listTopRef = useRef<HTMLDivElement>(null)
   const hasSearch = searchQuery.trim().length > 0
   const needsCatalog = hasSearch || showingAddons || showingHave
   const showPlatformMeta = showingCollection || hasSearch || showingAddons
@@ -137,66 +146,102 @@ function Catalog() {
     collectionSearchQuery,
   )
 
-  const resolvedCatalog = (allGames ?? [])
-    .filter(
-      (game) => !isAddon(game) || !isDeleted(game.platformId, game.id),
-    )
-    .map((game) => {
-      if (!isAddon(game)) return game
-      const override = matches[gameKey(game)]
-      if (!override) return game
-      return {
-        ...game,
-        parent_id: override.parent_id,
-        parent_title: override.parent_title,
-      }
-    })
+  const resolvedCatalog = useMemo(() => {
+    if (!allGames) return [] as ListGame[]
+    return allGames
+      .filter(
+        (game) => !isAddon(game) || !isDeleted(game.platformId, game.id),
+      )
+      .map((game) => {
+        if (!isAddon(game)) return game
+        const override = matches[gameKey(game)]
+        if (!override) return game
+        return {
+          ...game,
+          parent_id: override.parent_id,
+          parent_title: override.parent_title,
+        }
+      })
+  }, [allGames, matches, deleted])
 
-  const addonGames = resolvedCatalog.filter(isAddon)
-  const addonsByParent = new Map<string, ListGame[]>()
-  for (const addon of addonGames) {
-    if (addon.parent_id == null) continue
-    const key = `${addon.platformId}:${addon.parent_id}`
-    const group = addonsByParent.get(key)
-    if (group) group.push(addon)
-    else addonsByParent.set(key, [addon])
-  }
-  for (const [key, group] of addonsByParent) {
-    addonsByParent.set(key, sortByTitle(group))
-  }
+  const addonGames = useMemo(
+    () => resolvedCatalog.filter(isAddon),
+    [resolvedCatalog],
+  )
+
+  const sortedAddonGames = useMemo(
+    () => (showingAddons ? sortByTitle(addonGames) : addonGames),
+    [addonGames, showingAddons],
+  )
+
+  const addonsByParent = useMemo(() => {
+    const map = new Map<string, ListGame[]>()
+    if (!showingHave) return map
+    for (const addon of addonGames) {
+      if (addon.parent_id == null) continue
+      const key = `${addon.platformId}:${addon.parent_id}`
+      const group = map.get(key)
+      if (group) group.push(addon)
+      else map.set(key, [addon])
+    }
+    for (const [key, group] of map) {
+      if (group.length > 1) map.set(key, sortByTitle(group))
+    }
+    return map
+  }, [addonGames, showingHave])
 
   const hasAddonsSearch = addonsSearchQuery.trim().length > 0
   const addonsSearchNormalized = addonsSearchQuery.trim().toLowerCase()
-  const filteredAddons = addonGames.filter((game) => {
-    if (
-      addonsPlatformFilter !== ALL_PLATFORMS &&
-      game.platformId !== addonsPlatformFilter
-    ) {
-      return false
-    }
-    if (addonMatchFilter === 'matched' && game.parent_id == null) return false
-    if (addonMatchFilter === 'unmatched' && game.parent_id != null) return false
-    if (!addonsSearchNormalized) return true
-    return (
-      game.title.toLowerCase().includes(addonsSearchNormalized) ||
-      (game.parent_title?.toLowerCase().includes(addonsSearchNormalized) ??
-        false)
-    )
-  })
+  const filteredAddons = useMemo(() => {
+    return sortedAddonGames.filter((game) => {
+      if (
+        addonsPlatformFilter !== ALL_PLATFORMS &&
+        game.platformId !== addonsPlatformFilter
+      ) {
+        return false
+      }
+      if (addonMatchFilter === 'matched' && game.parent_id == null) {
+        return false
+      }
+      if (addonMatchFilter === 'unmatched' && game.parent_id != null) {
+        return false
+      }
+      if (!addonsSearchNormalized) return true
+      return (
+        game.title.toLowerCase().includes(addonsSearchNormalized) ||
+        (game.parent_title?.toLowerCase().includes(addonsSearchNormalized) ??
+          false)
+      )
+    })
+  }, [
+    sortedAddonGames,
+    addonMatchFilter,
+    addonsPlatformFilter,
+    addonsSearchNormalized,
+  ])
 
-  const matchedAddonCount = addonGames.filter((game) => game.parent_id != null).length
+  const matchedAddonCount = useMemo(
+    () => addonGames.filter((game) => game.parent_id != null).length,
+    [addonGames],
+  )
   const unmatchedAddonCount = addonGames.length - matchedAddonCount
   const baseGames = games.filter((game) => !isAddon(game))
-  const parentCandidatesByPlatform = new Map<string, ListGame[]>()
-  for (const game of resolvedCatalog) {
-    if (isAddon(game)) continue
-    const group = parentCandidatesByPlatform.get(game.platformId)
-    if (group) group.push(game)
-    else parentCandidatesByPlatform.set(game.platformId, [game])
-  }
-  for (const [key, group] of parentCandidatesByPlatform) {
-    parentCandidatesByPlatform.set(key, sortByTitle(group))
-  }
+  const needsMatchCandidates =
+    showingAddons &&
+    canManageAddons &&
+    !hasSearch &&
+    addonMatchFilter !== 'matched'
+  const parentCandidatesByPlatform = useMemo(() => {
+    const map = new Map<string, ListGame[]>()
+    if (!needsMatchCandidates) return map
+    for (const game of resolvedCatalog) {
+      if (isAddon(game)) continue
+      const group = map.get(game.platformId)
+      if (group) group.push(game)
+      else map.set(game.platformId, [game])
+    }
+    return map
+  }, [needsMatchCandidates, resolvedCatalog])
 
   const progressFilteredCollection =
     showingHave && haveProgressFilter !== 'all'
@@ -219,22 +264,24 @@ function Catalog() {
         })
       : progressFilteredCollection
 
-  const listGames: ListGame[] = sortByTitle(
-    hasSearch
-      ? filterByTitle(
+  const listGames: ListGame[] = hasSearch
+    ? sortByTitle(
+        filterByTitle(
           (allGames ?? []).filter((game) => !isAddon(game)),
           searchQuery,
-        )
-      : showingAddons
-        ? filteredAddons
-        : showingCollection
-          ? collectionListGames
-          : baseGames.map((game) => ({
+        ),
+      )
+    : showingAddons
+      ? filteredAddons
+      : showingCollection
+        ? sortByTitle(collectionListGames)
+        : sortByTitle(
+            baseGames.map((game) => ({
               ...game,
               platformId: platform.id,
               platformLabel: platform.label,
             })),
-  )
+          )
 
   const pageCount = Math.max(1, Math.ceil(listGames.length / PAGE_SIZE))
   const currentPage = Math.min(page, pageCount - 1)
@@ -249,7 +296,6 @@ function Catalog() {
   useEffect(() => {
     if (showingCollection || showingAddons) {
       setLoading(false)
-      setPage(0)
       return
     }
 
@@ -269,8 +315,13 @@ function Catalog() {
   }, [platform, showingCollection, showingAddons])
 
   useEffect(() => {
-    if (!needsCatalog || allGames) {
-      if (showingAddons || showingHave) setCatalogLoading(false)
+    if (!needsCatalog) {
+      setCatalogLoading(false)
+      return
+    }
+
+    if (allGames) {
+      setCatalogLoading(false)
       return
     }
 
@@ -297,10 +348,10 @@ function Catalog() {
     return () => {
       cancelled = true
     }
-  }, [needsCatalog, allGames, showingAddons, showingHave])
+  }, [needsCatalog, allGames])
 
   useEffect(() => {
-    listTopRef.current?.scrollIntoView({ block: 'start' })
+    window.scrollTo({ top: 0 })
   }, [
     platformId,
     currentPage,
@@ -336,6 +387,7 @@ function Catalog() {
   }
 
   function confirmDeleteAddon(game: ListGame) {
+    if (!canManageAddons) return
     const ok = window.confirm(
       `Permanently delete “${game.title}”? It will be hidden from Add-ons, Have, and Want.`,
     )
@@ -475,7 +527,7 @@ function Catalog() {
       </header>
 
       <main className="game-list">
-        <div className="list-heading" ref={listTopRef}>
+        <div className="list-heading">
           <div className="list-heading-text">
             <h2>
               {hasSearch
@@ -485,7 +537,7 @@ function Catalog() {
                   : showingWant
                     ? 'Want'
                     : showingAddons
-                      ? 'Add-on review'
+                      ? 'Add-ons'
                       : platform.label}
             </h2>
             <p>
@@ -503,7 +555,11 @@ function Catalog() {
                         ? `${listGames.length.toLocaleString()} of ${activeCollection.length.toLocaleString()} games`
                         : `${activeCollection.length.toLocaleString()} games`
                     : showingAddons
-                      ? `${listGames.length.toLocaleString()} add-ons · ${matchedAddonCount.toLocaleString()} matched · ${unmatchedAddonCount.toLocaleString()} unmatched`
+                      ? hasAddonsSearch ||
+                        addonsPlatformFilter !== ALL_PLATFORMS ||
+                        addonMatchFilter !== 'all'
+                        ? `${listGames.length.toLocaleString()} shown · ${matchedAddonCount.toLocaleString()} matched · ${unmatchedAddonCount.toLocaleString()} unmatched`
+                        : `${addonGames.length.toLocaleString()} total · ${matchedAddonCount.toLocaleString()} matched · ${unmatchedAddonCount.toLocaleString()} unmatched`
                       : `${baseGames.length.toLocaleString()} games`}
             </p>
           </div>
@@ -585,7 +641,7 @@ function Catalog() {
           ) : null}
 
           {!hasSearch && showingAddons ? (
-            <label className="search-field collection-search">
+            <label className="search-field addons-search">
               <span className="visually-hidden">Search add-ons</span>
               <input
                 type="search"
@@ -600,7 +656,7 @@ function Catalog() {
           ) : null}
 
           {!hasSearch && showingAddons && addonGames.length > 0 ? (
-            <div className="list-toolbar">
+            <div className="list-toolbar addons-toolbar">
               <div
                 className="sort-controls"
                 role="group"
@@ -648,7 +704,7 @@ function Catalog() {
                       setPage(0)
                     }}
                   >
-                    {item.label}
+                    {item.shortLabel}
                   </button>
                 ))}
               </div>
@@ -717,11 +773,16 @@ function Catalog() {
                     : null
                   const showMatchPicker =
                     showAddonMatch &&
+                    canManageAddons &&
                     (game.parent_id == null || Boolean(manualMatch))
 
                   return (
                     <li key={key} className={expanded ? 'is-expanded' : undefined}>
-                      <div className="game-row">
+                      <div
+                        className={
+                          showAddonMatch ? 'game-row addon-list-row' : 'game-row'
+                        }
+                      >
                         <div className="game-main">
                           <GameCover title={game.title} cover={game.cover} />
                           <span className="game-copy">
@@ -734,8 +795,9 @@ function Catalog() {
                               >
                                 <span className="game-title">{game.title}</span>
                                 <span className="addon-count">
-                                  {relatedAddons.length.toLocaleString()} add-on
-                                  {relatedAddons.length === 1 ? '' : 's'}
+                                  {`${relatedAddons.length.toLocaleString()} add-on${
+                                    relatedAddons.length === 1 ? '' : 's'
+                                  }`}
                                 </span>
                                 <span className="expand-caret" aria-hidden="true">
                                   {expanded ? '▴' : '▾'}
@@ -744,20 +806,20 @@ function Catalog() {
                             ) : (
                               <span className="game-title">{game.title}</span>
                             )}
+                            {showAddonMatch ? (
+                              game.parent_title ? (
+                                <span className="addon-parent matched">
+                                  {game.parent_title}
+                                </span>
+                              ) : (
+                                <span className="addon-parent unmatched">
+                                  Unmatched
+                                </span>
+                              )
+                            ) : null}
                             <span className="game-meta">
                               {showPlatformMeta ? (
                                 <span>{game.platformLabel}</span>
-                              ) : null}
-                              {showAddonMatch ? (
-                                game.parent_title ? (
-                                  <span className="match-badge matched">
-                                    → {game.parent_title}
-                                  </span>
-                                ) : (
-                                  <span className="match-badge unmatched">
-                                    Unmatched
-                                  </span>
-                                )
                               ) : null}
                               {game.release_year ? (
                                 <span>{game.release_year}</span>
@@ -765,30 +827,37 @@ function Catalog() {
                             </span>
                           </span>
                         </div>
-                        {showMatchPicker ? (
-                          <AddonMatchPicker
-                            addonTitle={game.title}
-                            candidates={
-                              parentCandidatesByPlatform.get(game.platformId) ??
-                              []
-                            }
-                            canClear={Boolean(manualMatch)}
-                            onClear={() =>
-                              clearMatch(game.platformId, game.id)
-                            }
-                            onMatch={(parent) =>
-                              setMatch(game.platformId, game.id, parent)
-                            }
-                          />
-                        ) : null}
                         {showAddonMatch ? (
-                          <button
-                            type="button"
-                            className="addon-delete"
-                            onClick={() => confirmDeleteAddon(game)}
-                          >
-                            Delete
-                          </button>
+                          <div className="addon-row-actions">
+                            {showMatchPicker ? (
+                              <AddonMatchPicker
+                                addonTitle={game.title}
+                                candidates={
+                                  parentCandidatesByPlatform.get(
+                                    game.platformId,
+                                  ) ?? []
+                                }
+                                canClear={Boolean(manualMatch)}
+                                onClear={() => {
+                                  if (!canManageAddons) return
+                                  clearMatch(game.platformId, game.id)
+                                }}
+                                onMatch={(parent) => {
+                                  if (!canManageAddons) return
+                                  setMatch(game.platformId, game.id, parent)
+                                }}
+                              />
+                            ) : null}
+                            {canManageAddons ? (
+                              <button
+                                type="button"
+                                className="addon-delete"
+                                onClick={() => confirmDeleteAddon(game)}
+                              >
+                                Delete
+                              </button>
+                            ) : null}
+                          </div>
                         ) : null}
                         {showCollectionActions
                           ? renderCollectionActions(game, ownership, {
